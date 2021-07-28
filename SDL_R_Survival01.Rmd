@@ -1,0 +1,559 @@
+---
+title: "SDL_R_Survival01"
+author: "Delin Sun"
+date: "8/28/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Survival analyses of the NMF outputs (10 component solution by Viraj) of cortical thickness data from NCANDA binge drinking project
+
+Delin Sun
+Version date 08/04/2020.
+
+### Independent Variables
+
+####Drinking_class
+Severity of drinking problem. 0 = no/to low drinkers, 1 = medium drinkers, 2= heavy drinkers, 3 = heavy drinker + binge. We can also combine 2 and 3 as heavy drinking.
+
+####Age_d
+The difference between a subject’s age at each scan and their mean age across individual timepoints (i.e. scan_age - subject_mean_age).
+
+####Age_m
+The difference between a subject’s mean age across visits and the mean age of the entire sample across timepoints (i.e. subject_mean_age - mean(subject_mean_age)), thus centering cohort age at the sample mean. Each participant’s cohort age remained constant across timepoints. 
+
+####Life_trauma_RP
+Cumulative trauma at baseline. It was quantified as the sum of reported DSM-IV or 5 Criterion A traumatic events on the PTSD section of the Semi-Structured Assessment for the Genetics of Alcoholism (Pierucci-Lagha, Gelernter et al. 2005). A traumatic event was counted once if either the parent and/or youth reported an event. No participant met DSM criteria for PTSD. Its range is 0~5. We can combine 4 and 5 as a group.
+
+####Fh_alc_density
+Family history of alcohol use and dependence (AUD) density. It was calculated based on the presence of AUD in first and second-degree relatives (Rice, Reich et al. 1995). Its range is 0~4.
+
+####Ses
+Socio economic status quantified using the highest parental years of education of either parent (Brown, Myers et al. 1998). The range is 6~20 yrs. We can categorize 0 = 6~12 yrs (high school or less), 1 = 13~15 yrs (associate), 2 = 16 yrs (BA, BS), 3 = 16 plus yrs (masters or higher). Or we can do 0 = 6~12 yrs, 1 = 13~20 yrs.
+
+####Race
+Self-identified race/ethnicity instead of “race”. Totally 3 categories: African-American/Black (AAmer), Caucasian/White (Cauc), and Other.
+
+####Sex
+Male and Female.
+
+####Subject
+Participant ID as a random effect variable.
+
+
+## Set path and load packages
+```{r,echo=FALSE,warning=FALSE,include=FALSE}
+#setwd("C:/Users/sunde/Documents/Projects/Viraj/baseline_nmf_glm_analysis")
+#Load Libraries
+library("readxl") # load .xls or .xlsx files
+library(tidyverse) # for data manipulation
+library(imager)
+library(survival)
+#install.packages("survminer")
+#install.packages("Rtools")
+library(survminer)
+#install.packages("ranger")
+library(ranger)
+library(ggplot2)
+library(ggfortify)
+library(sjPlot) # plot interactions of lm/lmer outputs
+library(ggpubr) # plot multiple panels
+library(plot.matrix)
+```
+
+# (0.1) Data cleaning
+Only employ subjects whose drinking class = 0 at baseline
+
+```{r,echo=FALSE}
+ # raw data, 826 subjects
+#df0 <- read.csv("../Original/Data_cleaned.csv",header=T)#ncanda_all_sites_out_drkclss_20200617
+df0 <- read_excel("../Original/ncanda_all_sites_out_drkclss_20200617.xlsx") 
+
+# 653 subjects after removing those drinking_class != 0 at baseline
+df1 <- df0 %>% select(c('subject','visit','drinking_class')) %>% pivot_wider(names_from = visit, values_from = drinking_class)  %>% filter(baseline==0) %>% pivot_longer(-subject, names_to = "visit", values_to = "drinking_class")
+df <- merge(df0,df1,by=c("subject","visit"),all.y=T) %>% rename(drinking_class=drinking_class.y) 
+
+# Summaries: Raw data
+par(mfrow=c(2,4))
+hist(df$age_m,las=1,main="Age_m",xlab=NULL,ylab="Count")
+#df %>% ggplot(aes(age_m)) + geom_histogram(col="red",aes(fill=..count..)) + scale_fill_gradient("Count",low="green",high="red") + theme(axis.title = element_blank()) + ggtitle("Cohort Age (Years)")
+hist(df$age_d,las=1,main="Age_d",xlab=NULL,ylab="Count")
+hist(df$drinking_class,las=1,main="Drinking_class",xlab=NULL,ylab="Count")
+barplot(table(df$sex),space=0.3,col="white",las=1,main="Sex",xlab=NULL,ylab="Count")
+barplot(table(df$race_label),horiz=F,col="white",las=2,main="Race",xlab=NULL,ylab="Count",na.action=T)
+hist(df$ses,las=1,main="Ses",xlab=NULL,ylab="Count")
+hist(df$fh_alc_density,las=1,main="fh_alc_density",xlab=NULL,ylab="Count")
+hist(df$life_trauma_RP,las=1,main="Life_trauma",xlab=NULL,ylab="Count")
+
+
+# Data Transform (suggested by Mike) 
+df_race <- read.csv("../Original/NCANDA_raceEdata.csv",header=T) %>% mutate(subject=ID,baseline=race3,followup_1y=race3,followup_2y=race3,followup_3y=race3) %>% select(c("subject","baseline","followup_1y","followup_2y","followup_3y")) %>% pivot_longer(-subject, names_to = "visit", values_to = "race_label")
+df <- merge(df,df_race,by=c("subject","visit"),all.x=T) %>% rename(race_label=race_label.y)
+
+df <- df %>% mutate(drinking_class = replace(drinking_class,drinking_class==3,2))
+df <- df %>% mutate(ses = replace(ses,ses<=12,0)) %>% mutate(ses = replace(ses,ses>12,1))
+df <- df %>% mutate(life_trauma_RP = replace(life_trauma_RP,life_trauma_RP==5,4))
+df <- df %>% mutate(race_label = str_replace_all(race_label,c("Caucasian/White"="Cauc","African-American/Black"="AAmer","other"="Other")))
+
+# Summarise: Transformed data
+par(mfrow=c(2,4))
+hist(df$age_m,las=1,main="Age_m",xlab=NULL,ylab="Count")
+hist(df$age_d,las=1,main="Age_d",xlab=NULL,ylab="Count")
+hist(df$drinking_class,las=1,main="Drinking_class",xlab=NULL,ylab="Count")
+barplot(table(df$sex),space=0.3,col="white",las=1,main="Sex",xlab=NULL,ylab="Count")
+barplot(table(df$race_label),horiz=F,col="white",las=2,main="Race",xlab=NULL,ylab="Count",na.action=T)
+hist(df$ses,las=1,main="Ses",xlab=NULL,ylab="Count")
+hist(df$fh_alc_density,las=1,main="fh_alc_density",xlab=NULL,ylab="Count")
+hist(df$life_trauma_RP,las=1,main="Life_trauma",xlab=NULL,ylab="Count")
+
+```
+
+# (0.2) A Function of Data Preparation for Survival Analyses
+```{r,echo=FALSE,warning=FALSE}
+# Input
+# --- N, threshold of drinking_class, 1 or 2
+# --- df, dataframe of raw data (after cleaning)
+# Output
+# --- df_dk, dataframe for survival analyses, with 2 new columns: status & time
+sdl_SurvPre <- function(N=1,df=df){
+#N = 2 # threshold of drinking_class
+
+# function to re-calculate drinking class levels
+fun_rs <- function(x,na.rm=T){ifelse(x>=N,1,0)} # values >= N are transformed into 1 (death or showing problem), otherwise 0 (alive or no-problem)
+
+# Survival Status initiation
+df_dk <- df %>% select(c('subject','visit','drinking_class')) %>% pivot_wider(names_from = visit, values_from = drinking_class) %>% mutate_at(c("followup_1y","followup_2y","followup_3y"),fun_rs) 
+
+# Survival Time initiation
+df_tm <- df %>% select(c('subject','visit','mri_t1_age')) %>% pivot_wider(names_from = visit, values_from = mri_t1_age) 
+
+# status
+# patient’s death/abnormal was observed (status = 1) or that survival time was censored (status = 0)
+df_dk$status <- df_dk %>% select(c("baseline":"followup_3y")) %>% apply(1,function(x){max(x,na.rm=TRUE)})
+
+# position of the 1st 1 per row
+df_dk0 <- df_dk %>% mutate_all(~replace(., is.na(.), 0)) # fill na with 0
+df_dk$pos1 <- df_dk0 %>% select(c("baseline":"followup_3y")) %>% max.col(ties.method = "first")*df_dk$status
+
+# position of the last 0 per row
+df_dk0 <- df_dk %>% mutate_all(~replace(., is.na(.), 1)) # fill na with 1
+df_xx <- -1*df_dk0 %>% select(c("baseline":"followup_3y")) # reverse to use max.col
+df_dk$pos0 <- df_xx %>% max.col(ties.method = "last")*(1-df_dk$status)
+
+# position of 1st 1s & last 0s
+df_dk$pos <- df_dk$pos1 + df_dk$pos0
+
+# survival time
+df_dk$time <- df_tm[,2:5] %>% as.matrix() %>% .[cbind(seq_len(nrow(df_tm)),df_dk$pos)]
+
+# finalize data frame for analyses
+df_dk <- df_dk %>% select(c("subject","status","time"))
+df_dk0 <- df %>% filter(visit=="baseline") %>% select(c("subject","bl_age","sex","life_trauma_RP","fh_alc_density","ses","race_label","nmf_comp01":"nmf_comp10","LLatVent":"Raccumb","L_tail":"TotalGM"))
+df_dk <- merge(df_dk,df_dk0,by=c("subject"),all.x=T)
+df_dk <- df_dk %>% mutate(time1 = time - bl_age) # survival time begins from baseline scan time
+
+df_dk$sex <- factor(df_dk$sex, 
+                     levels = c("F", "M"), 
+                     labels = c("Female", "Male"))
+
+#df_dk$lie_trauma_RP <- factor(df_dk$life_trauma_RP, levels = c(0,1,2,3,4), labels = c("Life Trauma_0","Life Trauma_1","Life Trauma_2","Life Trauma_3","Life Trauma_4"))
+
+df_dk$ses <- factor(df_dk$ses, 
+                     levels = c("0", "1"), 
+                     labels = c("SES_low", "SES_High"))
+
+df_dk$race_label <- factor(df_dk$race_label, 
+                     levels = c("Cauc", "AAmer","Other"), 
+                     labels = c("Race_Cauc", "Race_AAmer","Race_Other"))
+
+
+return(df_dk)
+}
+```
+
+
+## (0.3) Functions for statistical analyses and plots
+Totally 4 functions
+--- SDL_lm, extract models/coefficients/p values/plots for each component
+Already cleaned by Viraj's Matlab scripts
+--- SDL_heat, heatmap of p values across factors and componnets
+--- SDL_plt,  plot multiple main/interaction effects
+--- SDL_all,  call the above 3 functions
+```{r,echo=FALSE}
+
+#######################################################################
+# a function to model (lm/lmer/glm) data for each ROI, and extract models/coefficients/p-values of models
+# Input
+# --- nmf, dataframe column, e.g. df$col01, or select(col1:col10)
+# --- df, dataframe
+# --- Otype, the type of outputs, e.g. "model", "coef", and "p"
+# --- ftxt, text for the formula, e.g. "lmer(formula = y ~ age_d + age_m + drinking_class + sex + race_label + ses + fh_alc_density + life_trauma_RP + (1|subject)"
+# --- fterms, which factor to be plotted
+# --- fxy, x and y labels
+# Output
+# --- model, list of models
+# --- coef,  matrix of coefficients
+# --- pval,  matrix of coefficients
+# --- plt,   list of plotting objects
+SDL_lm <- function(nmf,df,Otype,ftxt,fterms=NULL,fxy=NULL){
+  model <- eval(parse(text=paste(substr(ftxt,1,nchar(ftxt)-1),", data = df)")))
+  coef  <- model %>% summary() %>% coefficients()
+  pval  <- coef  %>% .[,"Pr(>|z|)"]
+  
+  df <- df %>% mutate(nmf1 = ifelse(nmf < median(nmf), "<median", ">median"), nmf1 = factor(nmf1))
+  plt   <- survfit(Surv(time1, status) ~ nmf1, data=df) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+  
+  switch(Otype,"model"=return(model),"coef"=return(list(coef)),"pval"=return(pval),"plt"=return(list(plt)))
+}
+##############################################################################
+
+##############################################################################
+# A function to plot the heatmap of statistical significance across factors and components
+# Input
+# --- Pval, p-value matrix
+# Output
+# --- a heatmap of statistical significance
+SDL_heat <- function(Pval){
+  heatmap(Pval, margins =c(7,10), Colv=NA, Rowv=NA, main="p-values", scale="none", breaks=c(0,0.001,0.01,0.05,1), col=c('yellow','orange','red','grey')) # no color bar
+}
+##############################################################################
+
+##############################################################################
+# A function to plot the significant main and interaction effects
+# Input
+# --- Plt, plot list made by SDL_lm function
+# --- Pval, p-value matrix made by SDL_lm function
+# --- ffact, the factor used to threshold p-value matrix
+# --- pth, the significance threshold
+# Output
+# --- a heatmap of statistical significance
+SDL_plt <- function(Plt,Pval,ffact='drinking_class',pth=0.05){
+  if (length(which(Pval[ffact,]<pth))){
+  ind <- Pval[ffact,] < pth # index of significant components
+  Plt <- Plt[ind] # remove non-significant components
+  flabel <- colnames(Pval[,ind]) # labels of the significant components
+  ggarrange(plotlist=Plt,labels=flabel,common.legend=T,label.y=0.5) # multiple plots
+  }else{
+    paste0("NS: ",ffact)
+  }
+}
+##############################################################################
+
+
+
+##############################################################################
+# A function to combining the aforementioned 3 functions
+# Input
+# --- col, column(s) of dependent variables, e.g. df%>%select("nmf_comp01":"nmf_comp10")
+# --- df, dataframe
+# --- fcorr, the method for correction of multiple comparisons, e.g. 'fdr','bonferroni','none'
+# --- ftxt, lm/lmer/glm formula
+# --- fterms, independent variables
+# --- fxy, plot's x, y labels
+# --- ffact, the factor used to threshold p-value matrix
+# Output
+# --- a heatmap of statistical significance
+SDL_all <- function(col,df,fcorr,ftxt,fterms,fxy,ffact){
+  #get p-value matrix
+  Pval <- col %>% sapply(SDL_lm, df=df, Otype="pval", ftxt=ftxt)  
+  Pval_fdr <- Pval %>% t() %>% as.data.frame() %>% sapply(p.adjust,method=fcorr) %>% t()
+  colnames(Pval_fdr) <- colnames(Pval)
+  
+  # plot significance heatmap
+  Pval_fdr %>% SDL_heat() # show all significant effects (p < 0.05 unc.)
+
+  # plot significant main or interaction effects
+  col %>% sapply(SDL_lm, df=df, Otype="plt", ftxt=ftxt, fterms=fterms, fxy=fxy) %>% SDL_plt(Pval=Pval_fdr,ffact=ffact, pth=0.05) # statistical threshold
+}
+##############################################################################
+
+```
+
+## (0.4) NMF component brain maps
+```{r,echo=FALSE}
+im <- load.image('PSCs_10_selectcomps.jpg')
+plot(im)
+```
+
+### (0.5) Residuals after removing effects of bl_age & I(bl_age^2)
+```{r,echo=FALSE}
+# functions to get the residuals of nmf components after regressing out age and age^2
+# Input
+# --- df, dataframe
+# --- ftxt, text for the formula, e.g. "lm(formula = y ~ age + I(age^2)"
+# Output
+# --- res, list of residuals
+
+SDL_res <- function(y,df,ftxt){
+  res <- eval(parse(text=paste(substr(ftxt,1,nchar(ftxt)-1),", data = df)"))) %>% resid()
+}
+
+# Input
+# --- col, column(s) of dependent variables, e.g. df%>%select("nmf_comp01":"nmf_comp10")
+# --- df, dataframe
+# --- ftxt, lm/lmer/glm formula
+# Output
+# --- a dataframe of residuals
+SDL_reslists <- function(col,df,ftxt){
+  #get p-value matrix
+  reslist <- col %>% sapply(SDL_res, df=df, ftxt=ftxt) %>% as.data.frame()
+}
+
+```
+
+# (1) Survival Analyses: raw data without bl_age
+
+
+### (1.1) begins from baseline scan (N=1)
+```{r,echo=FALSE}
+# data for analyses
+df_dk <- sdl_SurvPre(N=1,df=df) # threshold: drinking_class=1
+
+# define model formula
+ftxt <- "coxph(Surv(time1, status) ~ nmf + sex + life_trauma_RP + fh_alc_density + ses + race_label)" # defined by the user
+
+# all functions
+df_dk %>% select("nmf_comp01":"nmf_comp10") %>% SDL_all(df=df_dk,fcorr='fdr',ftxt=ftxt,ffact='nmf')
+
+# coefficients
+coefs <- df_dk %>% select("nmf_comp01":"nmf_comp10") %>% sapply(SDL_lm, df=df_dk, Otype="coef", ftxt=ftxt) #coefs is a list of matrix
+
+# coefficients: nmf
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="nmf"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+# coefficients: race
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="race_labelRace_AAmer"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter
+
+survfit(Surv(time1, status) ~ race_label, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+```
+
+
+### (1.2) begins from baseline scan (N=2)
+```{r,echo=FALSE}
+# data for analyses
+df_dk <- sdl_SurvPre(N=2,df=df) # threshold: drinking_class=1
+
+# define model formula
+ftxt <- "coxph(Surv(time1, status) ~ nmf + sex + life_trauma_RP + fh_alc_density + ses + race_label)" # defined by the user
+
+# all functions: nmf
+df_dk %>% select("nmf_comp01":"nmf_comp10") %>% SDL_all(df=df_dk,fcorr='fdr',ftxt=ftxt,ffact='nmf')
+
+# coefficients
+coefs <- df_dk %>% select("nmf_comp01":"nmf_comp10") %>% sapply(SDL_lm, df=df_dk, Otype="coef", ftxt=ftxt) #coefs is a list of matrix
+
+# coefficients: nmf
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="nmf"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+# coefficients: sex
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="sexMale"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+survfit(Surv(time1, status) ~ sex, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+```
+
+
+# (2) Survival Analyses: raw data with bl_age as covariate
+
+
+### (2.1) begins from baseline scan (N=1)
+```{r,echo=FALSE}
+# data for analyses
+df_dk <- sdl_SurvPre(N=1,df=df) # threshold: drinking_class=1
+
+# define model formula
+ftxt <- "coxph(Surv(time1, status) ~ nmf + sex + life_trauma_RP + fh_alc_density + ses + race_label + bl_age)" # defined by the user
+
+# all functions
+df_dk %>% select("nmf_comp01":"nmf_comp10") %>% SDL_all(df=df_dk,fcorr='fdr',ftxt=ftxt,ffact='nmf')
+
+# coefficients
+coefs <- df_dk %>% select("nmf_comp01":"nmf_comp10") %>% sapply(SDL_lm, df=df_dk, Otype="coef", ftxt=ftxt) #coefs is a list of matrix
+
+# coefficients: nmf
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="nmf"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+# coefficients: bl_age
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="bl_age"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter
+
+df_dk <- df_dk %>% mutate(nmf = ifelse((bl_age < median(df_dk$bl_age)), "bl_age<median", "bl_age>median"), nmf = factor(nmf))
+survfit(Surv(time1, status) ~ nmf, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+
+# coefficients: race
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="race_labelRace_AAmer"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter
+
+survfit(Surv(time1, status) ~ race_label, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+```
+
+
+### (2.2) begins from baseline scan (N=2)
+```{r,echo=FALSE}
+# data for analyses
+df_dk <- sdl_SurvPre(N=2,df=df) # threshold: drinking_class=1
+
+# define model formula
+ftxt <- "coxph(Surv(time1, status) ~ nmf + sex + life_trauma_RP + fh_alc_density + ses + race_label +bl_age)" # defined by the user
+
+# all functions: nmf
+df_dk %>% select("nmf_comp01":"nmf_comp10") %>% SDL_all(df=df_dk,fcorr='fdr',ftxt=ftxt,ffact='nmf')
+
+# coefficients
+coefs <- df_dk %>% select("nmf_comp01":"nmf_comp10") %>% sapply(SDL_lm, df=df_dk, Otype="coef", ftxt=ftxt) #coefs is a list of matrix
+
+# coefficients: nmf
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="nmf"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+# coefficients: bl_age
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="bl_age"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter
+
+df_dk <- df_dk %>% mutate(nmf = ifelse((bl_age < median(df_dk$bl_age)), "bl_age<median", "bl_age>median"), nmf = factor(nmf))
+survfit(Surv(time1, status) ~ nmf, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+
+# coefficients: sex
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="sexMale"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+survfit(Surv(time1, status) ~ sex, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+```
+
+
+
+
+# (3) Survival Analyses: residuals after regressing out bl_age and I(bl_age^2)
+
+
+### (3.1) begins from baseline scan (N=1)
+```{r,echo=FALSE}
+# data for analyses
+df_dk <- sdl_SurvPre(N=1,df=df) # threshold: drinking_class=1
+
+reslist <- df_dk %>% select("nmf_comp01":"nmf_comp10") %>% SDL_reslists(df=df_dk,ftxt="lm(formula = y ~ bl_age + I(bl_age^2))") #residuals' list
+
+colnames(reslist) <- paste0("r",colnames(reslist))# residuals begin with rnmf_
+
+df_dk <- df_dk %>% cbind(reslist) # add residuals of nmf components
+
+# define model formula
+ftxt <- "coxph(Surv(time1, status) ~ nmf + sex + life_trauma_RP + fh_alc_density + ses + race_label)" # defined by the user
+
+# all functions
+df_dk %>% select("rnmf_comp01":"rnmf_comp10") %>% SDL_all(df=df_dk,fcorr='fdr',ftxt=ftxt,ffact='nmf')
+
+# coefficients
+coefs <- df_dk %>% select("rnmf_comp01":"rnmf_comp10") %>% sapply(SDL_lm, df=df_dk, Otype="coef", ftxt=ftxt) #coefs is a list of matrix
+
+# coefficients: nmf
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="nmf"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+# coefficients: race
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="race_labelRace_AAmer"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter
+
+survfit(Surv(time1, status) ~ race_label, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+```
+
+
+
+### (3.2) begins from baseline scan (N=2)
+```{r,echo=FALSE}
+# data for analyses
+df_dk <- sdl_SurvPre(N=2,df=df) # threshold: drinking_class=1
+
+reslist <- df_dk %>% select("nmf_comp01":"nmf_comp10") %>% SDL_reslists(df=df_dk,ftxt="lm(formula = y ~ bl_age + I(bl_age^2))") #residuals' list
+
+colnames(reslist) <- paste0("r",colnames(reslist))# residuals begin with rnmf_
+
+df_dk <- df_dk %>% cbind(reslist) # add residuals of nmf components
+
+# define model formula
+ftxt <- "coxph(Surv(time1, status) ~ nmf + sex + life_trauma_RP + fh_alc_density + ses + race_label)" # defined by the user
+
+# all functions: nmf
+df_dk %>% select("rnmf_comp01":"rnmf_comp10") %>% SDL_all(df=df_dk,fcorr='fdr',ftxt=ftxt,ffact='nmf')
+
+# coefficients
+coefs <- df_dk %>% select("rnmf_comp01":"rnmf_comp10") %>% sapply(SDL_lm, df=df_dk, Otype="coef", ftxt=ftxt) #coefs is a list of matrix
+
+# coefficients: nmf
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="nmf"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+# coefficients: sex
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="sexMale"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+survfit(Surv(time1, status) ~ sex, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+```
+
+
+
+
+
+
+# (4) Survival Analyses: raw data with bl_age as covariate (different age groups)
+
+
+### (4.1) begins from baseline scan (N=1,bl_age < 17)
+```{r,echo=FALSE}
+# data for analyses
+df_dk <- sdl_SurvPre(N=1,df=df) # threshold: drinking_class=1
+#df_dk <- df_dk %>% filter(bl_age>17 & bl_age<23)
+df_dk <- df_dk %>% filter(bl_age<17)
+  
+# define model formula
+ftxt <- "coxph(Surv(time1, status) ~ nmf + sex + life_trauma_RP + fh_alc_density + ses + race_label)" # defined by the user
+
+# all functions
+df_dk %>% select("nmf_comp01":"nmf_comp10") %>% SDL_all(df=df_dk,fcorr='fdr',ftxt=ftxt,ffact='nmf')
+
+# coefficients
+coefs <- df_dk %>% select("nmf_comp01":"nmf_comp10") %>% sapply(SDL_lm, df=df_dk, Otype="coef", ftxt=ftxt) #coefs is a list of matrix
+
+# coefficients: nmf
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="nmf"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter 
+
+# coefficients: bl_age
+#coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="bl_age"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+#row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+#coef_inter
+
+#df_dk <- df_dk %>% mutate(nmf = ifelse((bl_age < median(df_dk$bl_age)), "bl_age<median", "bl_age>median"), nmf = factor(nmf))
+#survfit(Surv(time1, status) ~ nmf, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+
+# coefficients: race
+coef_inter <- coefs %>% do.call(rbind,.) %>% .[which(rownames(.)=="race_labelRace_AAmer"),] %>% as.data.frame() %>% mutate(p_fdr=p.adjust(.[,"Pr(>|z|)"],method="fdr"))
+row.names(coef_inter) <- sprintf('nmf_comp%02d',1:10)
+coef_inter
+
+survfit(Surv(time1, status) ~ race_label, data=df_dk) %>% autoplot(xlab="Age Change (Years)",ylab="Prob. of Surv.")
+```
